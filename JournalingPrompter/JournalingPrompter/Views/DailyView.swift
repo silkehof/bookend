@@ -19,16 +19,23 @@ struct DailyView: View {
     @State private var showSavedIndicator = false
     @State private var journaledOnPaper = false
     @State private var showCelebration = false
+    @State private var isReordering = false
 
+    #if DEBUG
     // 0 = auto, 1 = morning, 2 = evening
     @AppStorage("devTimeOfDayOverride") private var devTimeOverride = 0
+    #endif
 
     private var timeOfDay: TimeOfDay {
+        #if DEBUG
         switch devTimeOverride {
         case 1: return .morning
         case 2: return .evening
         default: return TimeOfDay.current
         }
+        #else
+        return TimeOfDay.current
+        #endif
     }
 
     var body: some View {
@@ -48,6 +55,7 @@ struct DailyView: View {
             .scrollDismissesKeyboard(.immediately)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                #if DEBUG
                 ToolbarItem(placement: .principal) {
                     Picker("Time", selection: $devTimeOverride) {
                         Text("Auto").tag(0)
@@ -57,6 +65,7 @@ struct DailyView: View {
                     .pickerStyle(.segmented)
                     .frame(width: 220)
                 }
+                #endif
             }
             .onAppear {
                 loadTodayEntry()
@@ -173,6 +182,14 @@ struct DailyView: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
+                        Button {
+                            addPriorityFromEvent(event)
+                        } label: {
+                            Image(systemName: "plus.circle")
+                                .font(.title3)
+                                .foregroundStyle(Color.warmAccent)
+                        }
+                        .buttonStyle(.borderless)
                     }
                 }
             }
@@ -232,6 +249,14 @@ struct DailyView: View {
 
                 Spacer()
 
+                if let entry = todayEntry, entry.totalCount >= 2 && timeOfDay.isMorningMode {
+                    Button(isReordering ? "Done" : "Reorder") {
+                        isReordering.toggle()
+                    }
+                    .font(.subheadline)
+                    .foregroundStyle(Color.warmAccent)
+                }
+
                 if let entry = todayEntry, entry.totalCount > 0 {
                     Text("\(entry.completedCount)/\(entry.totalCount)")
                         .font(.subheadline)
@@ -239,7 +264,7 @@ struct DailyView: View {
                 }
             }
 
-            if timeOfDay.isMorningMode {
+            if timeOfDay.isMorningMode && !isReordering {
                 HStack {
                     TextField("What matters most today?", text: $newPriorityText)
                         .textFieldStyle(.plain)
@@ -260,24 +285,46 @@ struct DailyView: View {
             }
 
             if let entry = todayEntry, !entry.prioritiesArray.isEmpty {
-                ForEach(entry.prioritiesArray) { priority in
-                    PriorityRow(
-                        priority: priority,
-                        onToggle: {
-                            entryManager.togglePriority(priority)
-                            todayEntry = entryManager.getTodayEntry()
-                        },
-                        onDelete: {
-                            entryManager.deletePriority(priority)
-                            todayEntry = entryManager.getTodayEntry()
-                            showSaved()
-                        },
-                        onEdit: { newText in
-                            entryManager.updatePriorityText(priority, text: newText)
-                            todayEntry = entryManager.getTodayEntry()
-                            showSaved()
+                if isReordering {
+                    List {
+                        ForEach(entry.prioritiesArray) { priority in
+                            Text(priority.text ?? "")
+                                .strikethrough(priority.isCompleted)
+                                .foregroundStyle(priority.isCompleted ? .secondary : .primary)
+                                .listRowBackground(Color.warmCardBackground)
+                                .listRowSeparator(.hidden)
+                                .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
                         }
-                    )
+                        .onMove { source, destination in
+                            guard let entry = todayEntry else { return }
+                            entryManager.reorderPriorities(from: source, to: destination, in: entry)
+                            todayEntry = entryManager.getTodayEntry()
+                        }
+                    }
+                    .listStyle(.plain)
+                    .scrollDisabled(true)
+                    .frame(height: CGFloat(entry.prioritiesArray.count) * 50)
+                    .environment(\.editMode, .constant(.active))
+                } else {
+                    ForEach(entry.prioritiesArray) { priority in
+                        PriorityRow(
+                            priority: priority,
+                            onToggle: {
+                                entryManager.togglePriority(priority)
+                                todayEntry = entryManager.getTodayEntry()
+                            },
+                            onDelete: {
+                                entryManager.deletePriority(priority)
+                                todayEntry = entryManager.getTodayEntry()
+                                showSaved()
+                            },
+                            onEdit: { newText in
+                                entryManager.updatePriorityText(priority, text: newText)
+                                todayEntry = entryManager.getTodayEntry()
+                                showSaved()
+                            }
+                        )
+                    }
                 }
             } else if timeOfDay.isEveningMode {
                 Text("No priorities set for today")
@@ -301,22 +348,28 @@ struct DailyView: View {
             Text("Morning Thoughts")
                 .font(.headline)
 
-            TextEditor(text: $morningThoughts)
-                .frame(minHeight: 120)
-                .scrollContentBackground(.hidden)
-                .padding(12)
-                .background(Color.warmCardBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .onChange(of: morningThoughts) { _, newValue in
-                    if let entry = todayEntry {
-                        entryManager.updateMorningThoughts(newValue, for: entry)
-                        showSaved()
-                    }
+            ZStack(alignment: .topLeading) {
+                if morningThoughts.isEmpty {
+                    Text("What's on your mind as you start the day?")
+                        .font(.body)
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 20)
+                        .allowsHitTesting(false)
                 }
-
-            Text("What's on your mind as you start the day?")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
+                TextEditor(text: $morningThoughts)
+                    .frame(minHeight: 120)
+                    .scrollContentBackground(.hidden)
+                    .padding(12)
+                    .onChange(of: morningThoughts) { _, newValue in
+                        if let entry = todayEntry {
+                            entryManager.updateMorningThoughts(newValue, for: entry)
+                            showSaved()
+                        }
+                    }
+            }
+            .background(Color.warmCardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
         }
     }
 
@@ -527,6 +580,13 @@ struct DailyView: View {
             let activityNames = activitiesString.split(separator: ",").map { String($0) }
             selectedActivities = Set(activityNames.compactMap { Activity(rawValue: $0) })
         }
+    }
+
+    private func addPriorityFromEvent(_ event: EKEvent) {
+        guard let entry = todayEntry else { return }
+        entryManager.addPriority(text: event.title, to: entry)
+        todayEntry = entryManager.getTodayEntry()
+        showSaved()
     }
 
     private func addPriority() {

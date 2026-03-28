@@ -5,9 +5,7 @@ struct JournalEntryView: View {
     let mood: Mood
     let activities: [Activity]
 
-    @Environment(\.managedObjectContext) private var viewContext
     @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var streakManager: StreakManager
 
     @State private var entryText = ""
     @State private var showingSaveConfirmation = false
@@ -122,14 +120,13 @@ struct JournalEntryView: View {
         let trimmedText = entryText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty else { return }
 
-        _ = CoreDataManager.shared.createJournalEntry(
-            prompt: prompt,
-            content: trimmedText,
-            mood: mood.rawValue,
-            activities: activities.map { $0.rawValue }
-        )
+        let entryManager = DailyEntryManager.shared
+        let dailyEntry = entryManager.getOrCreateTodayEntry()
+        entryManager.updateEveningReflection(trimmedText, for: dailyEntry)
+        entryManager.updateEveningMood(mood.rawValue, for: dailyEntry)
+        entryManager.updateEveningActivities(activities.map { $0.rawValue }.joined(separator: ","), for: dailyEntry)
+        entryManager.updateReflectionPrompt(prompt, for: dailyEntry)
 
-        streakManager.logJournalEntry()
         showingSaveConfirmation = true
     }
 }

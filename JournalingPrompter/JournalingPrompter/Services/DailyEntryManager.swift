@@ -90,6 +90,17 @@ class DailyEntryManager: ObservableObject {
         save()
     }
 
+    func reorderPriorities(from source: IndexSet, to destination: Int, in entry: DailyEntry) {
+        var priorities = entry.prioritiesArray
+        priorities.move(fromOffsets: source, toOffset: destination)
+        // Reassign createdAt to persist the new order (createdAt is the sort key)
+        let base = Date(timeIntervalSinceNow: -Double(priorities.count) * 0.001)
+        for (index, priority) in priorities.enumerated() {
+            priority.createdAt = Date(timeInterval: Double(index) * 0.001, since: base)
+        }
+        save()
+    }
+
     func rollOverPriority(_ priority: Priority, to entry: DailyEntry) {
         let newPriority = Priority(context: viewContext)
         newPriority.id = UUID()

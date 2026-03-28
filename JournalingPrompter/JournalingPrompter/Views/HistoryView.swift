@@ -204,34 +204,64 @@ struct DailyEntryRow: View {
 struct DailyEntryDetailView: View {
     let entry: DailyEntry
     @Environment(\.dismiss) private var dismiss
+    @State private var isEditing = false
+    @State private var morningThoughtsEdit: String
+    @State private var eveningReflectionEdit: String
+
+    init(entry: DailyEntry) {
+        self.entry = entry
+        _morningThoughtsEdit = State(initialValue: entry.morningThoughts ?? "")
+        _eveningReflectionEdit = State(initialValue: entry.eveningReflection ?? "")
+    }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    // Morning Section
-                    if hasMorningContent {
+                    if hasMorningContent || isEditing {
                         morningSection
                     }
 
-                    // Priorities Section
                     if entry.totalCount > 0 {
                         prioritiesSection
                     }
 
-                    // Evening Section
-                    if hasEveningContent {
+                    if hasEveningContent || isEditing {
                         eveningSection
                     }
                 }
                 .padding()
             }
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle(formattedDate)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    if isEditing {
+                        Button("Cancel") {
+                            morningThoughtsEdit = entry.morningThoughts ?? ""
+                            eveningReflectionEdit = entry.eveningReflection ?? ""
+                            isEditing = false
+                        }
+                    } else {
+                        Button {
+                            isEditing = true
+                        } label: {
+                            Image(systemName: "pencil")
+                        }
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
-                        dismiss()
+                    if isEditing {
+                        Button("Save") {
+                            saveEdits()
+                            isEditing = false
+                        }
+                        .fontWeight(.semibold)
+                    } else {
+                        Button("Done") {
+                            dismiss()
+                        }
                     }
                 }
             }
@@ -244,6 +274,12 @@ struct DailyEntryDetailView: View {
 
     private var hasEveningContent: Bool {
         entry.eveningMood != nil || !(entry.eveningReflection ?? "").isEmpty
+    }
+
+    private func saveEdits() {
+        let manager = DailyEntryManager.shared
+        manager.updateMorningThoughts(morningThoughtsEdit, for: entry)
+        manager.updateEveningReflection(eveningReflectionEdit, for: entry)
     }
 
     private var morningSection: some View {
@@ -261,7 +297,14 @@ struct DailyEntryDetailView: View {
                 .font(.subheadline)
             }
 
-            if let thoughts = entry.morningThoughts, !thoughts.isEmpty {
+            if isEditing {
+                TextEditor(text: $morningThoughtsEdit)
+                    .frame(minHeight: 100)
+                    .scrollContentBackground(.hidden)
+                    .padding(8)
+                    .background(Color.warmSecondary.opacity(0.15))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else if let thoughts = entry.morningThoughts, !thoughts.isEmpty {
                 Text(thoughts)
                     .font(.body)
             }
@@ -345,7 +388,14 @@ struct DailyEntryDetailView: View {
                     .italic()
             }
 
-            if let reflection = entry.eveningReflection, !reflection.isEmpty {
+            if isEditing {
+                TextEditor(text: $eveningReflectionEdit)
+                    .frame(minHeight: 120)
+                    .scrollContentBackground(.hidden)
+                    .padding(8)
+                    .background(Color.warmSecondary.opacity(0.15))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else if let reflection = entry.eveningReflection, !reflection.isEmpty {
                 Text(reflection)
                     .font(.body)
             }

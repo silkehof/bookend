@@ -3,48 +3,98 @@ import SwiftUI
 struct JourneyView: View {
     @EnvironmentObject private var streakManager: StreakManager
     @State private var showAchievements = false
+    @State private var topMood: Mood?
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 20) {
-                Spacer()
+            ScrollView {
+                VStack(spacing: 20) {
+                    // Evolving tree visualization - the main focus
+                    treeVisualization
 
-                // Evolving tree visualization - the main focus
-                treeVisualization
+                    // Simple level label
+                    VStack(spacing: 4) {
+                        Text(streakManager.levelName)
+                            .font(.title2)
+                            .fontWeight(.semibold)
 
-                // Simple level label
-                VStack(spacing: 4) {
-                    Text(streakManager.levelName)
-                        .font(.title2)
-                        .fontWeight(.semibold)
-
-                    Text("\(streakManager.totalEntries) entries")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer()
-
-                // Minimal footer with achievements link
-                Button {
-                    showAchievements = true
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "medal.fill")
-                            .foregroundStyle(Color.warmAccent)
-                        Text("\(streakManager.unlockedAchievements.count) achievements")
+                        Text("\(streakManager.totalEntries) entries")
+                            .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
-                    .font(.subheadline)
+
+                    // This week stats card
+                    insightsCard
+
+                    // Minimal footer with achievements link
+                    Button {
+                        showAchievements = true
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "medal.fill")
+                                .foregroundStyle(Color.warmAccent)
+                            Text("\(streakManager.unlockedAchievements.count) achievements")
+                                .foregroundStyle(.secondary)
+                        }
+                        .font(.subheadline)
+                    }
+                    .padding(.bottom, 8)
                 }
-                .padding(.bottom, 8)
+                .padding()
             }
-            .padding()
             .navigationTitle("Your Journey")
             .sheet(isPresented: $showAchievements) {
                 AchievementsView()
             }
+            .onAppear { loadInsights() }
         }
+    }
+
+    private var insightsCard: some View {
+        HStack(spacing: 16) {
+            VStack(spacing: 4) {
+                if let mood = topMood {
+                    Text(mood.emoji)
+                        .font(.title2)
+                    Text(mood.rawValue.capitalized)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("—")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                    Text("Top Mood")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity)
+
+            Divider().frame(height: 40)
+
+            VStack(spacing: 4) {
+                Text("\(streakManager.currentStreak)")
+                    .font(.title2)
+                    .fontWeight(.bold)
+                    .foregroundStyle(Color.warmAccent)
+                Text("Day Streak")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .padding(16)
+        .background(Color.warmSecondary.opacity(0.15))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16)
+                .strokeBorder(Color.warmAccent.opacity(0.25), lineWidth: 1.5)
+        }
+    }
+
+    private func loadInsights() {
+        let weekEntries = DailyEntryManager.shared.getEntriesForCurrentWeek()
+        topMood = HistoryAnalyticsService.shared.getMoodFrequency(entries: weekEntries).first?.mood
     }
 
     private var treeVisualization: some View {
@@ -397,14 +447,15 @@ struct FruitTreeView: View {
                     .frame(width: 60, height: 60)
                     .offset(y: -155)
 
-                // Fruits
+                // Fruits — positions seeded from index to prevent re-randomising on re-render
                 ForEach(0..<5) { i in
+                    let angle = Double(i) * (2 * .pi / 5)
                     Circle()
                         .fill(Color.red)
                         .frame(width: 12, height: 12)
                         .offset(
-                            x: CGFloat.random(in: -50...50),
-                            y: CGFloat.random(in: (-130)...(-80))
+                            x: cos(angle) * 45,
+                            y: -105 + sin(angle) * 25
                         )
                 }
             }
@@ -479,15 +530,21 @@ struct MajesticTreeView: View {
 // MARK: - Decoration Components
 
 struct GrassView: View {
+    private static let grassHeights: [CGFloat] = [18, 22, 16, 24, 19, 25, 17, 21, 20, 23, 15, 22, 18, 24, 16]
+
     var body: some View {
         GeometryReader { geo in
             Path { path in
                 let width = geo.size.width
-                for i in stride(from: 0, to: width, by: 8) {
-                    let height = CGFloat.random(in: 15...25)
+                var idx = 0
+                var i: CGFloat = 0
+                while i < width {
+                    let height = GrassView.grassHeights[idx % GrassView.grassHeights.count]
                     path.move(to: CGPoint(x: i, y: 30))
                     path.addLine(to: CGPoint(x: i + 2, y: 30 - height))
                     path.addLine(to: CGPoint(x: i + 4, y: 30))
+                    i += 8
+                    idx += 1
                 }
             }
             .fill(Color.green.opacity(0.7))
