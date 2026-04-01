@@ -1,6 +1,104 @@
 import SwiftUI
 import EventKit
 
+// MARK: - Step Enums
+
+enum MorningStep: Int {
+    case mood = 0
+    case priorities = 1
+    case calendarEvents = 2
+    case thoughts = 3
+    case startDay = 4
+}
+
+enum EveningStep: Int {
+    case priorities = 0
+    case mood = 1
+    case activities = 2
+    case reflection = 3
+    case finishDay = 4
+}
+
+// MARK: - Step Indicator
+
+struct StepIndicatorView: View {
+    let totalSteps: Int
+    let currentStep: Int
+    let onBack: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: onBack) {
+                Image(systemName: "chevron.left")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(Color.warmAccent)
+            }
+            .opacity(currentStep == 0 ? 0 : 1)
+            .disabled(currentStep == 0)
+
+            HStack(spacing: 6) {
+                ForEach(0..<totalSteps, id: \.self) { index in
+                    Capsule()
+                        .fill(index == currentStep ? Color.warmAccent : Color.warmSecondary.opacity(0.4))
+                        .frame(width: index == currentStep ? 24 : 8, height: 8)
+                        .animation(.spring(response: 0.3), value: currentStep)
+                }
+            }
+            .frame(maxWidth: .infinity)
+
+            // Mirror back button width for centering
+            Image(systemName: "chevron.left")
+                .font(.body.weight(.semibold))
+                .opacity(0)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+    }
+}
+
+// MARK: - Step Card
+
+struct StepCard<Content: View>: View {
+    let title: String
+    let continueLabel: String
+    let onContinue: () -> Void
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(title)
+                .font(.title2)
+                .fontWeight(.semibold)
+                .padding(.bottom, 20)
+
+            content()
+
+            Spacer()
+
+            Button(action: onContinue) {
+                Text(continueLabel)
+                    .fontWeight(.semibold)
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(
+                        LinearGradient(
+                            colors: [Color.warmGradientStart, Color.warmGradientEnd],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .foregroundStyle(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 16)
+        }
+        .padding()
+    }
+}
+
+// MARK: - DailyView
+
 struct DailyView: View {
     @AppStorage("userName") private var userName = ""
     @StateObject private var entryManager = DailyEntryManager.shared
@@ -19,10 +117,16 @@ struct DailyView: View {
     @State private var showSavedIndicator = false
     @State private var journaledOnPaper = false
     @State private var showCelebration = false
+    @AppStorage("lastFinishedDayDate") private var lastFinishedDayDate = ""
+    @State private var showMorningStarted = false
+    @AppStorage("lastStartedDayDate") private var lastStartedDayDate = ""
     @State private var isReordering = false
+    @State private var currentStep: Int = 0
+    @State private var goingForward: Bool = true
+    @FocusState private var isThoughtsFocused: Bool
+    @FocusState private var isReflectionFocused: Bool
 
     #if DEBUG
-    // 0 = auto, 1 = morning, 2 = evening
     @AppStorage("devTimeOfDayOverride") private var devTimeOverride = 0
     #endif
 
@@ -38,21 +142,60 @@ struct DailyView: View {
         #endif
     }
 
+    private var hasCalendarStep: Bool {
+        let cal = CalendarService.shared
+        return cal.calendarEnabled && cal.authorizationStatus == .fullAccess && !cal.todayEvents.isEmpty
+    }
+
+    private var morningStepCount: Int { hasCalendarStep ? 5 : 4 }
+    private var eveningStepCount: Int { 5 }
+
+    private var totalSteps: Int {
+        timeOfDay.isMorningMode ? morningStepCount : eveningStepCount
+    }
+
+    // Map a linear index to MorningStep, skipping .calendarEvents when not available
+    private func morningStep(at index: Int) -> MorningStep {
+        if hasCalendarStep {
+            return MorningStep(rawValue: index) ?? .mood
+        } else {
+            // 0→mood, 1→priorities, 2→thoughts, 3→startDay
+            let raw = index < 2 ? index : index + 1
+            return MorningStep(rawValue: raw) ?? .mood
+        }
+    }
+
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 24) {
-                    greetingSection
+            VStack(spacing: 0) {
+                greetingSection
+                    .padding(.horizontal)
+                    .padding(.top, 8)
 
+                StepIndicatorView(
+                    totalSteps: totalSteps,
+                    currentStep: currentStep,
+                    onBack: {
+                        goingForward = false
+                        withAnimation(.spring(response: 0.3)) {
+                            currentStep -= 1
+                        }
+                    }
+                )
+
+                ZStack {
                     if timeOfDay.isMorningMode {
-                        morningContent
+                        morningStepView(for: morningStep(at: currentStep))
+                            .id("m\(currentStep)")
+                            .transition(stepTransition)
                     } else {
-                        eveningContent
+                        eveningStepView(for: EveningStep(rawValue: currentStep) ?? .priorities)
+                            .id("e\(currentStep)")
+                            .transition(stepTransition)
                     }
                 }
-                .padding()
+                .animation(.spring(response: 0.3), value: currentStep)
             }
-            .scrollDismissesKeyboard(.immediately)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 #if DEBUG
@@ -72,14 +215,25 @@ struct DailyView: View {
                 checkForRollover()
                 if timeOfDay.isMorningMode {
                     CalendarService.shared.fetchTodayEvents()
+                    // Restore "started" state if already tapped today
+                    if lastStartedDayDate == todayDateString {
+                        showMorningStarted = true
+                    }
                 }
+                if !timeOfDay.isMorningMode, let entry = todayEntry, entry.isCompleted {
+                    currentStep = eveningStepCount - 1
+                    if lastFinishedDayDate == todayDateString {
+                        showCelebration = true
+                    }
+                }
+            }
+            .onChange(of: timeOfDay.isMorningMode) { _, _ in
+                currentStep = 0
             }
             .sheet(isPresented: $showRolloverSheet) {
                 RolloverSheet(
                     priorities: incompletePriorities,
-                    onRollover: { selected in
-                        rollOverSelected(selected)
-                    }
+                    onRollover: { selected in rollOverSelected(selected) }
                 )
             }
             .sheet(isPresented: $showPromptPicker) {
@@ -98,24 +252,74 @@ struct DailyView: View {
         }
     }
 
-    private func showSaved() {
-        withAnimation(.easeIn(duration: 0.2)) {
-            showSavedIndicator = true
+    private var stepTransition: AnyTransition {
+        goingForward
+            ? .asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading))
+            : .asymmetric(insertion: .move(edge: .leading), removal: .move(edge: .trailing))
+    }
+
+    private func advanceStep() {
+        goingForward = true
+        withAnimation(.spring(response: 0.3)) {
+            currentStep += 1
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            withAnimation(.easeOut(duration: 0.3)) {
-                showSavedIndicator = false
+    }
+
+    // MARK: - Morning Steps
+
+    @ViewBuilder
+    private func morningStepView(for step: MorningStep) -> some View {
+        switch step {
+        case .mood:
+            StepCard(title: "How are you feeling this morning?", continueLabel: "Continue", onContinue: advanceStep) {
+                moodGrid(selectedMood: $selectedMorningMood, isMorning: true)
             }
+        case .priorities:
+            StepCard(title: "Today's Priorities", continueLabel: "Continue", onContinue: advanceStep) {
+                prioritiesContent
+            }
+        case .calendarEvents:
+            StepCard(title: "Today's Events", continueLabel: "Continue", onContinue: advanceStep) {
+                calendarEventsContent
+            }
+        case .thoughts:
+            StepCard(title: "Morning Thoughts", continueLabel: "Continue", onContinue: advanceStep) {
+                morningThoughtsContent
+            }
+            .onAppear { isThoughtsFocused = true }
+        case .startDay:
+            startMyDayStep
         }
     }
 
-    private var formattedDate: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "EEEE, d. MMMM"
-        return formatter.string(from: Date())
+    // MARK: - Evening Steps
+
+    @ViewBuilder
+    private func eveningStepView(for step: EveningStep) -> some View {
+        switch step {
+        case .priorities:
+            StepCard(title: "Today's Priorities", continueLabel: "Continue", onContinue: advanceStep) {
+                prioritiesContent
+            }
+        case .mood:
+            StepCard(title: "How are you feeling tonight?", continueLabel: "Continue", onContinue: advanceStep) {
+                moodGrid(selectedMood: $selectedEveningMood, isMorning: false)
+            }
+        case .activities:
+            StepCard(title: "What shaped your day?", continueLabel: "Continue", onContinue: advanceStep) {
+                activitiesGrid
+            }
+        case .reflection:
+            StepCard(title: "Evening Reflection", continueLabel: "Continue", onContinue: advanceStep) {
+                eveningReflectionContent
+            }
+            .onAppear { isReflectionFocused = true }
+        case .finishDay:
+            finishDayStep
+        }
     }
 
-    // MARK: - Greeting
+    // MARK: - Greeting (fixed header)
 
     private var greetingSection: some View {
         HStack(alignment: .top) {
@@ -139,116 +343,33 @@ struct DailyView: View {
                     .padding(.top, 12)
             }
         }
-        .padding(.top, 8)
     }
 
-    // MARK: - Morning Content
+    // MARK: - Reusable Step Content
 
-    private var morningContent: some View {
-        VStack(spacing: 24) {
-            calendarEventsSection
-            prioritiesSection
-            moodSection(title: "How are you feeling this morning?", selectedMood: $selectedMorningMood, isMorning: true)
-            morningThoughtsSection
-        }
-    }
-
-    @ViewBuilder
-    private var calendarEventsSection: some View {
-        let calendarService = CalendarService.shared
-        if calendarService.calendarEnabled &&
-           calendarService.authorizationStatus == .fullAccess &&
-           !calendarService.todayEvents.isEmpty {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 8) {
-                    Image(systemName: "calendar")
-                        .foregroundStyle(Color.warmAccent)
-                    Text("Today's Events")
-                        .font(.title3)
-                        .fontWeight(.semibold)
-                }
-
-                ForEach(calendarService.todayEvents, id: \.eventIdentifier) { event in
-                    HStack(spacing: 10) {
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(Color(cgColor: event.calendar.cgColor))
-                            .frame(width: 4, height: 36)
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(event.title)
-                                .font(.subheadline)
-                            Text(formattedEventTime(event))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+    private func moodGrid(selectedMood: Binding<Mood?>, isMorning: Bool) -> some View {
+        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+            ForEach(Mood.allCases) { mood in
+                MoodButton(
+                    mood: mood,
+                    isSelected: selectedMood.wrappedValue == mood
+                ) {
+                    withAnimation(.spring(response: 0.3)) {
+                        if selectedMood.wrappedValue == mood {
+                            selectedMood.wrappedValue = nil
+                        } else {
+                            selectedMood.wrappedValue = mood
                         }
-                        Spacer()
-                        Button {
-                            addPriorityFromEvent(event)
-                        } label: {
-                            Image(systemName: "plus.circle")
-                                .font(.title3)
-                                .foregroundStyle(Color.warmAccent)
-                        }
-                        .buttonStyle(.borderless)
-                    }
-                }
-            }
-            .padding(16)
-            .background(Color.warmSecondary.opacity(0.15))
-            .clipShape(RoundedRectangle(cornerRadius: 16))
-            .overlay {
-                RoundedRectangle(cornerRadius: 16)
-                    .strokeBorder(Color.warmAccent.opacity(0.25), lineWidth: 1.5)
-            }
-        }
-    }
-
-    private func formattedEventTime(_ event: EKEvent) -> String {
-        if event.isAllDay {
-            return "All day"
-        }
-        let formatter = DateFormatter()
-        formatter.timeStyle = .short
-        formatter.dateStyle = .none
-        let start = formatter.string(from: event.startDate)
-        let end = formatter.string(from: event.endDate)
-        return "\(start) – \(end)"
-    }
-
-    private func moodSection(title: String, selectedMood: Binding<Mood?>, isMorning: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.headline)
-
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                ForEach(Mood.allCases) { mood in
-                    MoodButton(
-                        mood: mood,
-                        isSelected: selectedMood.wrappedValue == mood
-                    ) {
-                        withAnimation(.spring(response: 0.3)) {
-                            if selectedMood.wrappedValue == mood {
-                                selectedMood.wrappedValue = nil
-                            } else {
-                                selectedMood.wrappedValue = mood
-                            }
-                            saveMood(mood: selectedMood.wrappedValue, isMorning: isMorning)
-                        }
+                        saveMood(mood: selectedMood.wrappedValue, isMorning: isMorning)
                     }
                 }
             }
         }
     }
 
-    private var prioritiesSection: some View {
+    private var prioritiesContent: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Today's Priorities")
-                    .font(.title3)
-                    .fontWeight(.semibold)
-
-                Spacer()
-
                 if let entry = todayEntry, entry.totalCount >= 2 && timeOfDay.isMorningMode {
                     Button(isReordering ? "Done" : "Reorder") {
                         isReordering.toggle()
@@ -256,6 +377,8 @@ struct DailyView: View {
                     .font(.subheadline)
                     .foregroundStyle(Color.warmAccent)
                 }
+
+                Spacer()
 
                 if let entry = todayEntry, entry.totalCount > 0 {
                     Text("\(entry.completedCount)/\(entry.totalCount)")
@@ -271,9 +394,7 @@ struct DailyView: View {
                         .padding(12)
                         .background(Color.warmCardBackground)
                         .clipShape(RoundedRectangle(cornerRadius: 10))
-                        .onSubmit {
-                            addPriority()
-                        }
+                        .onSubmit { addPriority() }
 
                     Button(action: addPriority) {
                         Image(systemName: "plus.circle.fill")
@@ -332,93 +453,89 @@ struct DailyView: View {
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 4)
             }
-
-        }
-        .padding(16)
-        .background(Color.warmSecondary.opacity(0.15))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
-        .overlay {
-            RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(Color.warmAccent.opacity(0.25), lineWidth: 1.5)
         }
     }
 
-    private var morningThoughtsSection: some View {
+    @ViewBuilder
+    private var calendarEventsContent: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Morning Thoughts")
-                .font(.headline)
+            ForEach(CalendarService.shared.todayEvents, id: \.eventIdentifier) { event in
+                HStack(spacing: 10) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color(cgColor: event.calendar.cgColor))
+                        .frame(width: 4, height: 36)
 
-            ZStack(alignment: .topLeading) {
-                if morningThoughts.isEmpty {
-                    Text("What's on your mind as you start the day?")
-                        .font(.body)
-                        .foregroundStyle(.tertiary)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 20)
-                        .allowsHitTesting(false)
-                }
-                TextEditor(text: $morningThoughts)
-                    .frame(minHeight: 120)
-                    .scrollContentBackground(.hidden)
-                    .padding(12)
-                    .onChange(of: morningThoughts) { _, newValue in
-                        if let entry = todayEntry {
-                            entryManager.updateMorningThoughts(newValue, for: entry)
-                            showSaved()
-                        }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(event.title)
+                            .font(.subheadline)
+                        Text(formattedEventTime(event))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-            }
-            .background(Color.warmCardBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-        }
-    }
-
-    // MARK: - Evening Content
-
-    private var eveningContent: some View {
-        VStack(spacing: 24) {
-            prioritiesSection
-            moodSection(title: "How are you feeling tonight?", selectedMood: $selectedEveningMood, isMorning: false)
-            activitiesSection
-            eveningReflectionSection
-            finishDaySection
-        }
-    }
-
-    private var activitiesSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("What shaped your day?")
-                .font(.headline)
-
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                ForEach(Activity.allCases) { activity in
-                    ActivityButton(
-                        activity: activity,
-                        isSelected: selectedActivities.contains(activity)
-                    ) {
-                        withAnimation(.spring(response: 0.3)) {
-                            if selectedActivities.contains(activity) {
-                                selectedActivities.remove(activity)
-                            } else {
-                                selectedActivities.insert(activity)
-                            }
-                            saveActivities()
-                        }
+                    Spacer()
+                    Button {
+                        addPriorityFromEvent(event)
+                    } label: {
+                        Image(systemName: "plus.circle")
+                            .font(.title3)
+                            .foregroundStyle(Color.warmAccent)
                     }
+                    .buttonStyle(.borderless)
                 }
             }
         }
     }
 
+    private var morningThoughtsContent: some View {
+        ZStack(alignment: .topLeading) {
+            if morningThoughts.isEmpty {
+                Text("What's on your mind as you start the day?")
+                    .font(.body)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 20)
+                    .allowsHitTesting(false)
+            }
+            TextEditor(text: $morningThoughts)
+                .frame(minHeight: 120)
+                .scrollContentBackground(.hidden)
+                .padding(12)
+                .focused($isThoughtsFocused)
+                .onChange(of: morningThoughts) { _, newValue in
+                    if let entry = todayEntry {
+                        entryManager.updateMorningThoughts(newValue, for: entry)
+                        showSaved()
+                    }
+                }
+        }
+        .background(Color.warmCardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
 
-    private var eveningReflectionSection: some View {
+    private var activitiesGrid: some View {
+        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+            ForEach(Activity.allCases) { activity in
+                ActivityButton(
+                    activity: activity,
+                    isSelected: selectedActivities.contains(activity)
+                ) {
+                    withAnimation(.spring(response: 0.3)) {
+                        if selectedActivities.contains(activity) {
+                            selectedActivities.remove(activity)
+                        } else {
+                            selectedActivities.insert(activity)
+                        }
+                        saveActivities()
+                    }
+                }
+            }
+        }
+    }
+
+    private var eveningReflectionContent: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Evening Reflection")
-                    .font(.headline)
-
                 Spacer()
-
                 if !journaledOnPaper {
                     Button {
                         showPromptPicker = true
@@ -457,6 +574,7 @@ struct DailyView: View {
                         .frame(minHeight: 150)
                         .scrollContentBackground(.hidden)
                         .padding(12)
+                        .focused($isReflectionFocused)
                         .onChange(of: eveningReflection) { _, newValue in
                             if let entry = todayEntry {
                                 entryManager.updateEveningReflection(newValue, for: entry)
@@ -492,69 +610,234 @@ struct DailyView: View {
         }
     }
 
-    private var finishDaySection: some View {
-        VStack(spacing: 12) {
-            if let entry = todayEntry {
-                if entry.isCompleted {
-                    Button {
-                        withAnimation(.spring(response: 0.3)) {
-                            showCelebration = true
-                        }
+    // MARK: - CTA Steps
 
-                        // Auto-hide celebration after 2 seconds
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                            withAnimation(.easeOut(duration: 0.3)) {
-                                showCelebration = false
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: showCelebration ? "checkmark.circle.fill" : "moon.stars.fill")
-                                .font(.title3)
+    private var startMyDayStep: some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                // CTA area
+                VStack(spacing: 16) {
+                    Image(systemName: showMorningStarted ? "checkmark.circle.fill" : "sun.max.fill")
+                        .font(.system(size: 60))
+                        .foregroundStyle(showMorningStarted ? Color.green : Color.warmAccent)
+                        .animation(.spring(response: 0.3), value: showMorningStarted)
 
-                            Text(showCelebration ? "Day Complete! 🎉" : "Finish Day")
-                                .fontWeight(.semibold)
-                        }
+                    Text(showMorningStarted ? "Have a great day! ☀️" : "Ready to start your day?")
+                        .font(.title2)
+                        .fontWeight(.semibold)
+                        .multilineTextAlignment(.center)
+                        .animation(.easeInOut, value: showMorningStarted)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, 32)
+
+                Button {
+                    lastStartedDayDate = todayDateString
+                    withAnimation(.spring(response: 0.3)) { showMorningStarted = true }
+                } label: {
+                    Text("Start My Day")
+                        .fontWeight(.semibold)
                         .frame(maxWidth: .infinity)
                         .padding()
                         .background(
                             LinearGradient(
-                                colors: showCelebration ? [.green, .green] : [Color(red: 0.95, green: 0.65, blue: 0.50), Color(red: 0.85, green: 0.50, blue: 0.55)],
+                                colors: [Color.warmGradientStart, Color.warmGradientEnd],
                                 startPoint: .leading,
                                 endPoint: .trailing
                             )
                         )
                         .foregroundStyle(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                }
+                .buttonStyle(.plain)
+                .disabled(showMorningStarted)
+                .opacity(showMorningStarted ? 0 : 1)
+                .animation(.easeInOut, value: showMorningStarted)
+
+                // Summary — revealed after tapping
+                if showMorningStarted {
+                    VStack(spacing: 12) {
+                        // Mood
+                        HStack(spacing: 12) {
+                            Image(systemName: "face.smiling")
+                                .font(.title3)
+                                .foregroundStyle(Color.warmAccent)
+                                .frame(width: 28)
+                            Text("Mood")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            if let mood = selectedMorningMood {
+                                Text("\(mood.emoji) \(mood.rawValue)")
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                            } else {
+                                Text("Not set")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                        .padding(14)
+                        .background(Color.warmCardBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                        // Priorities
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 12) {
+                                Image(systemName: "checkmark.circle")
+                                    .font(.title3)
+                                    .foregroundStyle(Color.warmAccent)
+                                    .frame(width: 28)
+                                Text(todayEntry.map { "\($0.totalCount) \($0.totalCount == 1 ? "priority" : "priorities")" } ?? "Priorities")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                            }
+                            if let entry = todayEntry {
+                                ForEach(entry.prioritiesArray) { priority in
+                                    HStack(spacing: 8) {
+                                        Circle()
+                                            .fill(Color.warmAccent.opacity(0.5))
+                                            .frame(width: 6, height: 6)
+                                        Text(priority.text ?? "")
+                                            .font(.subheadline)
+                                    }
+                                    .padding(.leading, 40)
+                                }
+                            }
+                        }
+                        .padding(14)
+                        .background(Color.warmCardBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                        // Thoughts
+                        HStack(alignment: .top, spacing: 12) {
+                            Image(systemName: "text.alignleft")
+                                .font(.title3)
+                                .foregroundStyle(Color.warmAccent)
+                                .frame(width: 28)
+                            if morningThoughts.isEmpty {
+                                Text("No thoughts captured")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.tertiary)
+                            } else {
+                                Text(morningThoughts)
+                                    .font(.subheadline)
+                                    .lineLimit(4)
+                            }
+                            Spacer()
+                        }
+                        .padding(14)
+                        .background(Color.warmCardBackground)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
-                    .buttonStyle(.plain)
-                    .disabled(showCelebration)
-                } else {
-                    // Show what's missing for completion
-                    HStack(spacing: 8) {
-                        Image(systemName: "info.circle")
-                            .foregroundStyle(.secondary)
-                        Text(incompletenessReason)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .background(Color.warmCardBackground)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
+            .padding()
         }
+        .scrollDismissesKeyboard(.interactively)
+    }
+
+    private var finishDayStep: some View {
+        VStack {
+            Spacer()
+            VStack(spacing: 24) {
+                Image(systemName: "moon.stars.fill")
+                    .font(.system(size: 60))
+                    .foregroundStyle(Color.warmAccent)
+
+                if let entry = todayEntry {
+                    if entry.isCompleted {
+                        VStack(spacing: 8) {
+                            Text("You're done for today")
+                                .font(.title2)
+                                .fontWeight(.semibold)
+                            Text("Great job capturing your day")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Button {
+                            lastFinishedDayDate = todayDateString
+                            withAnimation(.spring(response: 0.3)) { showCelebration = true }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: showCelebration ? "checkmark.circle.fill" : "moon.stars.fill")
+                                    .font(.title3)
+                                Text(showCelebration ? "Day Complete! 🎉" : "Finish Day")
+                                    .fontWeight(.semibold)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(
+                                LinearGradient(
+                                    colors: showCelebration ? [Color.green, Color.green] : [Color(red: 0.95, green: 0.65, blue: 0.50), Color(red: 0.85, green: 0.50, blue: 0.55)],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .foregroundStyle(.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 16))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(showCelebration)
+                        .padding(.horizontal)
+                    } else {
+                        VStack(spacing: 16) {
+                            Text("Almost there...")
+                                .font(.title2)
+                                .fontWeight(.semibold)
+
+                            HStack(spacing: 8) {
+                                Image(systemName: "info.circle")
+                                    .foregroundStyle(.secondary)
+                                Text(incompletenessReason)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(12)
+                            .background(Color.warmCardBackground)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                            .padding(.horizontal)
+                        }
+                    }
+                }
+            }
+            Spacer()
+        }
+        .padding()
+    }
+
+    // MARK: - Helpers
+
+    private var formattedDate: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEEE, d. MMMM"
+        return formatter.string(from: Date())
+    }
+
+    private var todayDateString: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
+    }
+
+    private func formattedEventTime(_ event: EKEvent) -> String {
+        if event.isAllDay { return "All day" }
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        formatter.dateStyle = .none
+        return "\(formatter.string(from: event.startDate)) – \(formatter.string(from: event.endDate))"
     }
 
     private var incompletenessReason: String {
         guard let entry = todayEntry else { return "Loading..." }
-
         let hasReflection = !(entry.eveningReflection ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         if !hasReflection && !entry.journaledOnPaper {
             return "Write an evening reflection or mark as journaled on paper"
         }
-
         return "Continue filling out your day"
     }
 
@@ -567,15 +850,12 @@ struct DailyView: View {
         currentPrompt = todayEntry?.reflectionPrompt
         journaledOnPaper = todayEntry?.journaledOnPaper ?? false
 
-        // Load saved moods
         if let morningMoodString = todayEntry?.morningMood {
             selectedMorningMood = Mood(rawValue: morningMoodString)
         }
         if let eveningMoodString = todayEntry?.eveningMood {
             selectedEveningMood = Mood(rawValue: eveningMoodString)
         }
-
-        // Load saved activities
         if let activitiesString = todayEntry?.eveningActivities {
             let activityNames = activitiesString.split(separator: ",").map { String($0) }
             selectedActivities = Set(activityNames.compactMap { Activity(rawValue: $0) })
@@ -601,7 +881,6 @@ struct DailyView: View {
     private func checkForRollover() {
         guard !hasCheckedRollover && timeOfDay.isMorningMode else { return }
         hasCheckedRollover = true
-
         let incomplete = entryManager.getIncompletePrioritiesFromYesterday()
         if !incomplete.isEmpty {
             incompletePriorities = incomplete
@@ -632,6 +911,13 @@ struct DailyView: View {
         let activitiesString = selectedActivities.map { $0.rawValue }.joined(separator: ",")
         entryManager.updateEveningActivities(activitiesString, for: entry)
         showSaved()
+    }
+
+    private func showSaved() {
+        withAnimation(.easeIn(duration: 0.2)) { showSavedIndicator = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            withAnimation(.easeOut(duration: 0.3)) { showSavedIndicator = false }
+        }
     }
 }
 
@@ -783,9 +1069,7 @@ struct PriorityRow: View {
 
     private func saveEdit() {
         let trimmed = editText.trimmingCharacters(in: .whitespaces)
-        if !trimmed.isEmpty {
-            onEdit(trimmed)
-        }
+        if !trimmed.isEmpty { onEdit(trimmed) }
         isEditing = false
     }
 }
@@ -831,10 +1115,8 @@ struct RolloverSheet: View {
                 .listStyle(.plain)
 
                 HStack(spacing: 16) {
-                    Button("Skip All") {
-                        dismiss()
-                    }
-                    .buttonStyle(.bordered)
+                    Button("Skip All") { dismiss() }
+                        .buttonStyle(.bordered)
 
                     Button("Roll Over Selected") {
                         let selected = priorities.filter { selectedPriorities.contains($0.id ?? UUID()) }
@@ -876,12 +1158,8 @@ struct PromptSelectionSheet: View {
                             Image(systemName: "sparkles")
                                 .foregroundStyle(Color.warmAccent)
                             Text("Generate with AI")
-
                             Spacer()
-
-                            if isGenerating {
-                                ProgressView()
-                            }
+                            if isGenerating { ProgressView() }
                         }
                     }
                     .disabled(isGenerating)
@@ -890,9 +1168,7 @@ struct PromptSelectionSheet: View {
                         Text(prompt)
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
-                            .onTapGesture {
-                                onSelect(prompt)
-                            }
+                            .onTapGesture { onSelect(prompt) }
                     }
                 }
 
@@ -900,9 +1176,7 @@ struct PromptSelectionSheet: View {
                     ForEach(OfflinePrompts.eveningReflection, id: \.self) { prompt in
                         Text(prompt)
                             .font(.subheadline)
-                            .onTapGesture {
-                                onSelect(prompt)
-                            }
+                            .onTapGesture { onSelect(prompt) }
                     }
                 }
             }
@@ -910,9 +1184,7 @@ struct PromptSelectionSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        dismiss()
-                    }
+                    Button("Cancel") { dismiss() }
                 }
             }
         }
@@ -938,7 +1210,6 @@ struct PromptSelectionSheet: View {
                 }
             } catch {
                 await MainActor.run {
-                    // Fallback to context-aware offline prompt or random
                     if let mood = mood {
                         generatedPrompt = OfflinePrompts.getPrompt(mood: mood, activities: activities, timeOfDay: .current)
                     } else {
